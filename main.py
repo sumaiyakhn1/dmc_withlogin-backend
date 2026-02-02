@@ -1,20 +1,49 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import pandas as pd
 import os
 
-app = FastAPI()
+# -------------------------------------------------
+# Force Docs + OpenAPI enabled (important)
+# -------------------------------------------------
+app = FastAPI(
+    title="Student Login API",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
 
-# Absolute path (important for Render)
+# -------------------------------------------------
+# Enable CORS (for frontend connection later)
+# -------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -------------------------------------------------
+# Absolute path for Render
+# -------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCEL_FILE = os.path.join(BASE_DIR, "students.xlsx")
 
 
+# -------------------------------------------------
+# Request Model
+# -------------------------------------------------
 class LoginRequest(BaseModel):
     login_id: str
     password: str
 
 
+# -------------------------------------------------
+# Load Students
+# -------------------------------------------------
 def load_students():
     if not os.path.exists(EXCEL_FILE):
         raise HTTPException(status_code=500, detail="students.xlsx not found")
@@ -28,11 +57,17 @@ def load_students():
     return df
 
 
+# -------------------------------------------------
+# Root
+# -------------------------------------------------
 @app.get("/")
 def home():
     return {"message": "Student Login API Running 🚀"}
 
 
+# -------------------------------------------------
+# Login
+# -------------------------------------------------
 @app.post("/login")
 def login(data: LoginRequest):
 
