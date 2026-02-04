@@ -6,10 +6,7 @@ import requests
 import os
 import time
 
-# -------------------------------------------------
-# APP SETUP
-# -------------------------------------------------
-app = FastAPI(title="Student Login + Session API")
+app = FastAPI(title="Student Login Pipeline API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -19,9 +16,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------------------------------
-# CONSTANTS
-# -------------------------------------------------
+# --------------------------------------------------
+# CONFIG
+# --------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+EXCEL_FILE = os.path.join(BASE_DIR, "students.xlsx")
+
 ENTITY_ID = "6608ec3120337200120f347e"
 
 ODPAY_LOGIN_URL = "https://staging.odpay.in/login"
@@ -30,49 +30,24 @@ STUDENT_LOGIN_URL = "https://staging.odpay.in/studentLogin"
 ODPAY_MOBILE = "9015434510"
 ODPAY_PASSWORD = "9015434510"
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EXCEL_FILE = os.path.join(BASE_DIR, "students.xlsx")
-
-# -------------------------------------------------
+# --------------------------------------------------
 # TOKEN CACHE
-# -------------------------------------------------
-LOGIN_TOKEN = None
+# --------------------------------------------------
+TOKEN = None
 TOKEN_TIME = 0
 TOKEN_TTL = 20 * 60  # 20 minutes
 
-def get_odpay_token():
-    global LOGIN_TOKEN, TOKEN_TIME
-
-    if LOGIN_TOKEN and (time.time() - TOKEN_TIME < TOKEN_TTL):
-        return LOGIN_TOKEN
-
-    res = requests.post(
-        ODPAY_LOGIN_URL,
-        json={
-            "mobile": ODPAY_MOBILE,
-            "password": ODPAY_PASSWORD
-        },
-        timeout=10
-    )
-
-    if res.status_code != 200:
-        raise HTTPException(401, "ODPay login failed")
-
-    LOGIN_TOKEN = res.json().get("token")
-    TOKEN_TIME = time.time()
-    return LOGIN_TOKEN
-
-# -------------------------------------------------
-# REQUEST MODEL
-# -------------------------------------------------
+# --------------------------------------------------
+# MODELS
+# --------------------------------------------------
 class LoginRequest(BaseModel):
-    login_id: str   # regNo
-    password: str   # DOB (01-Mar-2005)
+    login_id: str
+    password: str   # 01-Mar-2005
 
-# -------------------------------------------------
-# EXCEL VALIDATION
-# -------------------------------------------------
-def validate_student_from_excel(regNo: str, dob: str):
+# --------------------------------------------------
+# LOAD EXCEL
+# --------------------------------------------------
+def load_students():
     if not os.path.exists(EXCEL_FILE):
         raise HTTPException(500, "students.xlsx not found")
 
@@ -82,62 +57,83 @@ def validate_student_from_excel(regNo: str, dob: str):
     df["Scholar ID"] = df["Scholar ID"].astype(str).str.strip()
     df["Birthday"] = pd.to_datetime(df["Birthday"]).dt.strftime("%d-%b-%Y")
 
-    student = df[
-        (df["Scholar ID"] == regNo) &
-        (df["Birthday"] == dob)
-    ]
+    return df
 
-    if student.empty:
-        return None
+# --------------------------------------------------
+# GET ODPAY TOKEN
+# --------------------------------------------------
+def get_odpay_token():
+    global TOKEN, TOKEN_TIME
 
-    return student.iloc[0].to_dict()
+    if TOKEN and (time.time() - TOKEN_TIME < TOKEN_TTL):
+        return TOKEN
 
-# -------------------------------------------------
-# HEALTH CHECK
-# -------------------------------------------------
+    res = requests.post(
+        ODPAY_LOGIN_URL,
+        json={"mobile": ODPAY_MOBILE, "password": ODPAY_PASSWORD},
+        timeout=10
+    )
+
+    if res.status_code != 200:
+        raise HTTPException(401, "ODPay login failed")
+
+    TOKEN = res.json().get("token")
+    TOKEN_TIME = time.time()
+
+    return TOKEN
+
+# --------------------------------------------------
+# ROOT
+# --------------------------------------------------
 @app.get("/")
 def home():
     return {"message": "Backend running 🚀"}
 
-# -------------------------------------------------
-# LOGIN API (STEP 2 ONLY)
-# -------------------------------------------------
+# --------------------------------------------------
+# LOGIN + SESSION PIPELINE
+# --------------------------------------------------
 @app.post("/login")
 def login(data: LoginRequest):
-    regNo = data.login_id.strip()
+    df = load_students()
+
+    roll_no = data.login_id.strip()
     dob = data.password.strip()
 
-    # 1️⃣ Validate from Excel
-    student = validate_student_from_excel(regNo, dob)
-    if not student:
+    student = df[
+        (df["Scholar ID"] == roll_no) &
+        (df["Birthday"] == dob)
+    ]
+
+    if student.empty:
         raise HTTPException(401, "Invalid Roll Number or DOB")
 
-    # 2️⃣ Get ODPay token
+    student_row = student.iloc[0]
+
+    # 1️⃣ Get ODPay token
     token = get_odpay_token()
 
-    # 3️⃣ Call studentLogin → session list
+    # 2️⃣ Call studentLogin
     res = requests.post(
         STUDENT_LOGIN_URL,
         headers={
-            "Authorization": f"Bearer {token}"
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
         },
         json={
             "entity": ENTITY_ID,
-            "regNo": regNo
+            "regNo": roll_no
         },
         timeout=10
     )
 
     if res.status_code != 200:
-        raise HTTPException(404, "Session list not found")
+        raise HTTPException(404, "Student not found in ODPay")
 
     session_list = res.json().get("sessionList", [])
 
-    # 4️⃣ Return clean response
+    # 3️⃣ FINAL RESPONSE
     return {
-        "student": {
-            "name": student.get("Name as per 10th Document"),
-            "regNo": regNo
-        },
+        "name": student_row["Name as per 10th Document"],
+        "regNo": roll_no,
         "sessionList": session_list
     }
