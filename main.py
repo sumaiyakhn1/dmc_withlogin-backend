@@ -1,24 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import pandas as pd
-import os
 import requests
 
-# -------------------------------------------------
-# App config
-# -------------------------------------------------
 app = FastAPI(
-    title="Student Login API",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json"
+    title="Student Session API",
+    version="1.1.0"
 )
 
-# -------------------------------------------------
-# Enable CORS
-# -------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,101 +16,91 @@ app.add_middleware(
 )
 
 # -------------------------------------------------
-# File path
+# CONSTANTS
 # -------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EXCEL_FILE = os.path.join(BASE_DIR, "students.xlsx")
+ENTITY_ID = "6608ec3120337200120f347e"
+ODPAY_LOGIN_URL = "https://staging.odpay.in/login"
+STUDENT_LOGIN_URL = "https://staging.odpay.in/studentLogin"
 
-# -------------------------------------------------
-# Models
-# -------------------------------------------------
-class LoginRequest(BaseModel):
-    login_id: str
-    password: str
+ODPAY_MOBILE = "9015434510"
+ODPAY_PASSWORD = "9015434510"
 
-# -------------------------------------------------
-# Load students from Excel
-# -------------------------------------------------
-def load_students():
-    if not os.path.exists(EXCEL_FILE):
-        raise HTTPException(status_code=500, detail="students.xlsx not found")
+LOGIN_TOKEN = None
 
-    df = pd.read_excel(EXCEL_FILE)
-    df.columns = df.columns.str.strip()
-    df["Scholar ID"] = df["Scholar ID"].astype(str).str.strip()
-    df["Birthday"] = pd.to_datetime(df["Birthday"]).dt.strftime("%d-%b-%Y")
-
-    return df
 
 # -------------------------------------------------
-# Root
+# LOGIN FUNCTION
 # -------------------------------------------------
-@app.get("/")
-def home():
-    return {"message": "Student Login API Running 🚀"}
+def login_odpay():
+    global LOGIN_TOKEN
 
-# -------------------------------------------------
-# Student Login (Reg No + DOB)
-# -------------------------------------------------
-@app.post("/login")
-def login(data: LoginRequest):
-    df = load_students()
-
-    login_id = data.login_id.strip()
-    password = data.password.strip()
-
-    student = df[
-        (df["Scholar ID"] == login_id) &
-        (df["Birthday"] == password)
-    ]
-
-    if student.empty:
-        raise HTTPException(status_code=401, detail="Invalid ID or Password")
-
-    student_data = student.iloc[0].to_dict()
-    student_data.pop("Birthday", None)
-
-    return {
-        "message": "Login Successful",
-        "student": student_data
-    }
-
-# -------------------------------------------------
-# Backend Auth (Hardcoded ODPay Login)
-# -------------------------------------------------
-auth_token = None  # cached token
-
-
-@app.post("/backend-auth")
-def backend_auth():
-    global auth_token
-
-    # 1️⃣ If token already cached → reuse
-    if auth_token:
-        return {
-            "token": auth_token,
-            "cached": True
-        }
-
-    # 2️⃣ Otherwise → call ODPay login
     res = requests.post(
-        "https://staging.odpay.in/login",
+        ODPAY_LOGIN_URL,
         json={
-            "mobile": "9015434510",
-            "password": "9015434510"
+            "mobile": ODPAY_MOBILE,
+            "password": ODPAY_PASSWORD
         },
         timeout=10
     )
 
     if res.status_code != 200:
-        raise HTTPException(status_code=401, detail="ODPay login failed")
+        raise HTTPException(401, "ODPay login failed")
 
-    # 3️⃣ Save token in memory
-    auth_token = res.json().get("token")
+    LOGIN_TOKEN = res.json().get("token")
+    return LOGIN_TOKEN
+
+
+# -------------------------------------------------
+# STUDENT LOGIN CALL (with retry)
+# -------------------------------------------------
+def call_student_login(regNo: str, retry=False):
+    global LOGIN_TOKEN
+
+    if not LOGIN_TOKEN:
+        login_odpay()
+
+    res = requests.post(
+        STUDENT_LOGIN_URL,
+        headers={
+            "Authorization": f"Bearer {LOGIN_TOKEN}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "entity": ENTITY_ID,
+            "regNo": regNo
+        },
+        timeout=10
+    )
+
+    # 🔁 Token expired → relogin once
+    if res.status_code == 401 and not retry:
+        login_odpay()
+        return call_student_login(regNo, retry=True)
+
+    return res
+
+
+# -------------------------------------------------
+# HEALTH CHECK
+# -------------------------------------------------
+@app.get("/")
+def home():
+    return {"message": "Student Session API running 🚀"}
+
+
+# -------------------------------------------------
+# API FOR FRONTEND
+# -------------------------------------------------
+@app.post("/student/session")
+def get_session_list(regNo: str):
+    res = call_student_login(regNo)
+
+    if res.status_code != 200:
+        raise HTTPException(res.status_code, res.text)
+
+    data = res.json()
 
     return {
-        "token": auth_token,
-        "cached": False
+        "regNo": regNo,
+        "sessionList": data.get("sessionList", [])
     }
-
-
