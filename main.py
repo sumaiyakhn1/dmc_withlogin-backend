@@ -6,7 +6,9 @@ import requests
 import os
 import time
 
-app = FastAPI(title="Student Login Pipeline API")
+from student_details import fetch_student_details
+
+app = FastAPI(title="Student Login API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,38 +32,28 @@ STUDENT_LOGIN_URL = "https://staging.odpay.in/studentLogin"
 ODPAY_MOBILE = "9015434510"
 ODPAY_PASSWORD = "9015434510"
 
-# --------------------------------------------------
-# TOKEN CACHE
-# --------------------------------------------------
 TOKEN = None
 TOKEN_TIME = 0
-TOKEN_TTL = 20 * 60  # 20 minutes
+TOKEN_TTL = 20 * 60
 
 # --------------------------------------------------
 # MODELS
 # --------------------------------------------------
 class LoginRequest(BaseModel):
     login_id: str
-    password: str   # 01-Mar-2005
+    password: str
 
 # --------------------------------------------------
-# LOAD EXCEL
+# HELPERS
 # --------------------------------------------------
 def load_students():
-    if not os.path.exists(EXCEL_FILE):
-        raise HTTPException(500, "students.xlsx not found")
-
     df = pd.read_excel(EXCEL_FILE)
     df.columns = df.columns.str.strip()
-
     df["Scholar ID"] = df["Scholar ID"].astype(str).str.strip()
     df["Birthday"] = pd.to_datetime(df["Birthday"]).dt.strftime("%d-%b-%Y")
-
     return df
 
-# --------------------------------------------------
-# GET ODPAY TOKEN
-# --------------------------------------------------
+
 def get_odpay_token():
     global TOKEN, TOKEN_TIME
 
@@ -79,18 +71,10 @@ def get_odpay_token():
 
     TOKEN = res.json().get("token")
     TOKEN_TIME = time.time()
-
     return TOKEN
 
 # --------------------------------------------------
-# ROOT
-# --------------------------------------------------
-@app.get("/")
-def home():
-    return {"message": "Backend running 🚀"}
-
-# --------------------------------------------------
-# LOGIN + SESSION PIPELINE
+# ROUTES
 # --------------------------------------------------
 @app.post("/login")
 def login(data: LoginRequest):
@@ -105,35 +89,28 @@ def login(data: LoginRequest):
     ]
 
     if student.empty:
-        raise HTTPException(401, "Invalid Roll Number or DOB")
+        raise HTTPException(401, "Invalid Scholar ID or DOB")
 
-    student_row = student.iloc[0]
-
-    # 1️⃣ Get ODPay token
     token = get_odpay_token()
 
-    # 2️⃣ Call studentLogin
     res = requests.post(
         STUDENT_LOGIN_URL,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "entity": ENTITY_ID,
-            "regNo": roll_no
-        },
+        headers={"Authorization": f"Bearer {token}"},
+        json={"entity": ENTITY_ID, "regNo": roll_no},
         timeout=10
     )
 
     if res.status_code != 200:
         raise HTTPException(404, "Student not found in ODPay")
 
-    session_list = res.json().get("sessionList", [])
-
-    # 3️⃣ FINAL RESPONSE
     return {
-        "name": student_row["Name as per 10th Document"],
+        "name": student.iloc[0]["Name as per 10th Document"],
         "regNo": roll_no,
-        "sessionList": session_list
+        "sessionList": res.json().get("sessionList", [])
     }
+
+
+@app.get("/student/details")
+def student_details(regNo: str, session: str):
+    token = get_odpay_token()
+    return fetch_student_details(regNo, session, token)
